@@ -1,0 +1,8 @@
+# LeRobot: ACT policy, datasets, train/viz CLI
+lerobot>=0.4
+
+# Load HF token from .env
+python-dotenv>=1.0.0
+
+# Inference: read video frames
+opencv-python>=4.8.0
