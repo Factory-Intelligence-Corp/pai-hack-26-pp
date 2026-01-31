@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
 Load a LeRobot dataset from ~/data and print basic info (num_episodes, num_frames, meta).
-Optionally list ~/data subdirs that look like LeRobot datasets.
+Supports both v2.1 and v3.0 formats. Does not modify info.json.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 
@@ -23,7 +24,37 @@ try:
 except ImportError:
     pass
 
-from lerobot.common.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+from lerobot.datasets.backward_compatibility import BackwardCompatibilityError
+from lerobot.datasets.lerobot_dataset import LeRobotDataset, LeRobotDatasetMetadata
+
+
+def load_v21_metadata(dataset_root: Path) -> dict:
+    """Load metadata from v2.1 format (info.json) without version check."""
+    info_path = dataset_root / "meta" / "info.json"
+    if not info_path.exists():
+        raise FileNotFoundError(f"meta/info.json not found at {dataset_root}")
+    with open(info_path) as f:
+        return json.load(f)
+
+
+def print_dataset_info(repo_id: str, dataset_root: Path, info: dict, episodes: list[int] | None = None) -> None:
+    """Print dataset info from loaded metadata."""
+    total_episodes = info.get("total_episodes", "N/A")
+    total_frames = info.get("total_frames", "N/A")
+    fps = info.get("fps", "N/A")
+    robot_type = info.get("robot_type", "N/A")
+    features = info.get("features", {})
+    camera_keys = [k for k, v in features.items() if v.get("dtype") in ("video", "image")]
+
+    print(f"Dataset: {repo_id} (root={dataset_root})")
+    print(f"  codebase_version: {info.get('codebase_version', 'N/A')}")
+    print(f"  total_episodes: {total_episodes}")
+    print(f"  total_frames:  {total_frames}")
+    print(f"  fps:           {fps}")
+    print(f"  robot_type:    {robot_type}")
+    print(f"  camera_keys:   {camera_keys}")
+    if episodes:
+        print(f"  requested episodes: {episodes}")
 
 
 def find_lerobot_datasets(data_root: str) -> list[str]:
@@ -64,7 +95,7 @@ def main() -> None:
         names = find_lerobot_datasets(root)
         if not names:
             print(f"No LeRobot-style datasets found under {root}")
-            print("Expected subdirs with data/ and meta/ (e.g. pusht).")
+            print("Expected subdirs with data/ and meta/ (e.g. so101_bench_real_2_v2.1).")
             return
         print(f"Datasets under {root}:")
         for n in names:
@@ -77,42 +108,40 @@ def main() -> None:
         print(f"Dataset not found: {dataset_path}")
         return
 
+    # LeRobot expects root to be the dataset directory (containing meta/, data/, videos/).
+    dataset_root = Path(dataset_path)
+
     episodes = None
     if args.episodes is not None:
         episodes = [int(x.strip()) for x in args.episodes.split(",")]
 
     try:
-        meta = LeRobotDatasetMetadata(repo_id, root=root)
-    except TypeError:
-        # Some versions use repo_id as full path for local datasets
-        meta = LeRobotDatasetMetadata(os.path.join(root, repo_id))
-    except Exception as e:
-        print(f"Failed to load metadata: {e}")
+        meta = LeRobotDatasetMetadata(repo_id, root=dataset_root)
+        print_dataset_info(repo_id, dataset_root, meta.info, episodes)
+        print(f"  (loaded via LeRobot v3 API)")
         try:
-            ds = LeRobotDataset(repo_id, root=root, episodes=episodes or [0])
-            meta = ds.meta
+            ds = LeRobotDataset(repo_id, root=dataset_root, episodes=episodes)
         except TypeError:
-            ds = LeRobotDataset(os.path.join(root, repo_id), episodes=episodes or [0])
-            meta = ds.meta
-        except Exception as e2:
-            print(f"Failed to load dataset: {e2}")
-            return
-
-    print(f"Dataset: {repo_id} (root={root})")
-    print(f"  total_episodes: {meta.total_episodes}")
-    print(f"  total_frames:  {getattr(meta, 'total_frames', 'N/A')}")
-    print(f"  fps:           {meta.fps}")
-    print(f"  robot_type:    {getattr(meta, 'robot_type', 'N/A')}")
-    print(f"  camera_keys:   {meta.camera_keys}")
-
-    try:
-        ds = LeRobotDataset(repo_id, root=root, episodes=episodes)
+            ds = LeRobotDataset(str(dataset_root), episodes=episodes)
+        print(f"  loaded episodes: {ds.num_episodes}")
+        print(f"  loaded frames:   {ds.num_frames}")
+    except BackwardCompatibilityError:
+        # v2.1 format: load info.json directly, do not modify it
+        info = load_v21_metadata(dataset_root)
+        print_dataset_info(repo_id, dataset_root, info, episodes)
+        print(f"  (v2.1 format - metadata loaded from info.json, no conversion applied)")
     except TypeError:
-        ds = LeRobotDataset(os.path.join(root, repo_id), episodes=episodes)
-    print(f"  loaded episodes: {ds.num_episodes}")
-    print(f"  loaded frames:   {ds.num_frames}")
-    if hasattr(ds.meta, "action_dim") or "action" in getattr(ds, "features", {}):
-        print(f"  meta: {ds.meta}")
+        meta = LeRobotDatasetMetadata(str(dataset_root))
+        print_dataset_info(repo_id, dataset_root, meta.info, episodes)
+        try:
+            ds = LeRobotDataset(str(dataset_root), episodes=episodes)
+            print(f"  loaded episodes: {ds.num_episodes}")
+            print(f"  loaded frames:   {ds.num_frames}")
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"Failed to load: {e}")
+        return
 
 
 if __name__ == "__main__":
