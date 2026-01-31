@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-Train ACT policy on a LeRobot dataset under ~/data.
-Loads .env for HF token, then runs lerobot-train with dataset from local root.
-If your lerobot version does not support --dataset.root, push the dataset to
-Hugging Face Hub first or copy it to the cache dir; see README.
+Train Diffusion policy on so101_bench_real dataset under ~/data.
+Loads .env for HF token, then runs lerobot-train with policy.type=diffusion.
+
+so101_bench_real contains video/image observations (observation.images.front,
+observation.images.overhead) suitable for Diffusion Policy training.
+
+Usage:
+  uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1
+  uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1 --root ~/data
+  uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1 --output-dir outputs/train/diffusion_so101
 """
 from __future__ import annotations
 
@@ -28,10 +34,14 @@ def main() -> None:
     except ImportError:
         pass
 
-    parser = argparse.ArgumentParser(description="Train ACT on LeRobot dataset in ~/data")
+    parser = argparse.ArgumentParser(
+        description="Train Diffusion policy on LeRobot dataset in ~/data"
+    )
     parser.add_argument(
         "dataset_name",
-        help="Dataset name (subdir under DATA_ROOT, e.g. so101_bench_real_2_v2.1)",
+        nargs="?",
+        default="so101_bench_real_2_v2.1",
+        help="Dataset name (subdir under DATA_ROOT, default: so101_bench_real_2_v2.1)",
     )
     parser.add_argument(
         "--root",
@@ -41,12 +51,12 @@ def main() -> None:
     parser.add_argument(
         "--output-dir",
         default=None,
-        help="Training output directory (default: outputs/train/act_<dataset_name>)",
+        help="Training output directory (default: outputs/train/diffusion_<dataset_name>)",
     )
     parser.add_argument(
         "--job-name",
         default=None,
-        help="Job name for logging (default: act_<dataset_name>)",
+        help="Job name for logging (default: diffusion_<dataset_name>)",
     )
     parser.add_argument(
         "--policy-repo-id",
@@ -60,6 +70,18 @@ def main() -> None:
         help="Device for training (default: cuda)",
     )
     parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Batch size (default: policy preset, often 8 for diffusion)",
+    )
+    parser.add_argument(
+        "--steps",
+        type=int,
+        default=None,
+        help="Training steps (default: 100000)",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Only print the lerobot-train command, do not run",
@@ -68,31 +90,35 @@ def main() -> None:
 
     root = os.path.expanduser(args.root)
     dataset_name = args.dataset_name
-    # lerobot expects dataset.root to be the directory that contains meta/, data/, videos/
     dataset_root = os.path.join(root, dataset_name)
-    job_name = args.job_name or f"act_{dataset_name}"
+    job_name = args.job_name or f"diffusion_{dataset_name}"
     output_dir = args.output_dir or os.path.join("outputs", "train", job_name)
-    policy_repo_id = args.policy_repo_id or f"act_{dataset_name}"
+    policy_repo_id = args.policy_repo_id or f"diffusion_{dataset_name}"
 
     cmd = [
         "lerobot-train",
         f"--dataset.repo_id={dataset_name}",
         f"--dataset.root={dataset_root}",
         "--dataset.video_backend=pyav",
-        "--policy.type=act",
+        "--policy.type=diffusion",
         f"--output_dir={output_dir}",
         f"--job_name={job_name}",
         f"--policy.device={args.device}",
         f"--policy.repo_id={policy_repo_id}",
     ]
 
+    if args.batch_size is not None:
+        cmd.append(f"--batch_size={args.batch_size}")
+    if args.steps is not None:
+        cmd.append(f"--steps={args.steps}")
+
     if args.dry_run:
         print("Would run:")
-        print(" ", " ".join(cmd))
+        print("  " + " ".join(cmd))
         return
 
-    # Do not create output_dir here; lerobot-train creates it and errors if it exists with resume=False
-    ret = subprocess.run(cmd, cwd=os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    ret = subprocess.run(cmd, cwd=project_root)
     if ret.returncode != 0:
         sys.exit(ret.returncode)
 

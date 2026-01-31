@@ -1,7 +1,7 @@
 [project]
 name = "pai-hack-26-pp"
 version = "0.1.0"
-description = "LeRobot demo and scripts: visualize, load, train ACT, inference"
+description = "LeRobot demo and scripts for so101_bench_real: visualize, load, train ACT/Diffusion, inference"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [

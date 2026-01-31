@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """
-Run ACT policy on a new video: load video frames, build observation, run select_action, output actions.
-Expects video resolution/fps to match training when possible; for multi-camera training,
-pass multiple --video paths with matching camera keys (see --camera-keys).
+Run policy on a new video: load video frames, build observation, run select_action, output actions.
+Supports ACT policy. For so101_bench_real, use --camera-keys observation.images.front (or both
+observation.images.front,observation.images.overhead for multi-camera).
+Expects video resolution/fps to match training when possible.
 """
 from __future__ import annotations
 
@@ -28,7 +29,7 @@ except ImportError:
     pass
 
 import cv2
-from lerobot.common.policies.act.modeling_act import ACTPolicy
+from lerobot.policies.act.modeling_act import ACTPolicy
 
 
 def load_video_frames(path: str, max_frames: int | None = None) -> list[torch.Tensor]:
@@ -61,13 +62,13 @@ def main() -> None:
     parser.add_argument(
         "--policy-path",
         default=None,
-        help="Local path or HF repo_id for ACT policy (e.g. lerobot/act_pusht or outputs/train/act_pusht)",
+        help="Local path or HF repo_id for policy (e.g. outputs/train/diffusion_so101 or outputs/train/act_so101)",
     )
     parser.add_argument(
         "--camera-keys",
         type=str,
-        default="observation.images.top",
-        help="Comma-separated observation.images keys (default: observation.images.top). Must match policy/dataset.",
+        default="observation.images.front",
+        help="Comma-separated observation.images keys (default: observation.images.front for so101). Must match policy/dataset.",
     )
     parser.add_argument(
         "--state",
@@ -96,7 +97,7 @@ def main() -> None:
     args = parser.parse_args()
 
     if args.policy_path is None:
-        parser.error("--policy-path is required (e.g. lerobot/act_pusht or path to checkpoint)")
+        parser.error("--policy-path is required (e.g. outputs/train/diffusion_so101 or path to checkpoint)")
 
     policy_path = args.policy_path
     camera_keys = [k.strip() for k in args.camera_keys.split(",")]
@@ -141,7 +142,7 @@ def main() -> None:
             state_dim = policy.config.input_shapes.get("observation.state", [0])
             state_dim = state_dim[-1] if isinstance(state_dim, list) and state_dim else 2
         if state_dim is None:
-            state_dim = 2  # pusht-like default
+            state_dim = 6  # so101 default (6-D state)
         if isinstance(state_dim, list):
             state_dim = state_dim[-1] if state_dim else 2
         state = torch.zeros(1, state_dim, device=args.device)
