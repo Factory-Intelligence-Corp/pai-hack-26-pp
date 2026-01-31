@@ -1,0 +1,18 @@
+[project]
+name = "pai-hack-26-pp"
+version = "0.1.0"
+description = "LeRobot demo and scripts: visualize, load, train ACT, inference"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "lerobot>=0.4",
+    "python-dotenv>=1.0.0",
+    "opencv-python>=4.8.0",
+    "evdev-binary>=1.9.2",
+]
+
+[tool.uv]
+# Avoid building evdev (needs linux-headers); use evdev-binary instead
+override-dependencies = [
+    "evdev ; sys_platform == 'never'",
+]
