@@ -4,5 +4,13 @@ lerobot>=0.4
 # Load HF token from .env
 python-dotenv>=1.0.0
 
-# Inference: read video frames
+# Inference: read video frames (pyav for AV1 codec support)
 opencv-python>=4.8.0
+av>=15.0.0
+
+# Streamlit SO101 inference app
+streamlit>=1.28.0
+plotly>=5.18.0
+
+# Pinocchio for 3D arm FK (SO101 URDF)
+pin>=2.6.0

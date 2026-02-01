@@ -1,0 +1,184 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>SO101 Arm Viewer</title>
+  <style>
+    html, body { margin: 0; overflow: hidden; font-family: sans-serif; width: 100%; height: 100%; }
+    #container { width: 100%; height: 100%; min-height: 400px; }
+    #controls {
+      position: absolute; top: 10px; left: 10px;
+      background: rgba(0,0,0,0.7); color: #fff; padding: 10px; border-radius: 8px;
+      font-size: 12px; z-index: 10;
+    }
+    #controls button { margin: 2px; cursor: pointer; padding: 4px 10px; }
+    #controls input[type=number] { margin: 0 4px; }
+  </style>
+</head>
+<body>
+  <div id="container"></div>
+  <div id="controls">
+    <button id="playBtn">Play</button>
+    <button id="pauseBtn">Pause</button>
+    <span>Frame: <span id="frameLabel">0</span> / <span id="totalFrames">0</span></span>
+    <input type="range" id="frameSlider" min="0" max="0" value="0" style="width:120px;vertical-align:middle">
+    <span>Speed: <input type="number" id="speedInput" value="8" min="1" max="60" step="1" style="width:45px"> fps</span>
+  </div>
+  <script type="importmap">
+  {"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/":"https://unpkg.com/three@0.160.0/"}}
+  </script>
+  <script type="module">
+    import * as THREE from 'three';
+    import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+
+    // Precomputed 3D positions from Python (Pinocchio FK). Format: [{links:[[x,y,z],...], gripper:[[x,y,z],[x,y,z],[x,y,z]]}, ...]
+    const TRAJECTORY = window.SO101_TRAJECTORY || [];
+
+    function getFrame(i) {
+      const f = TRAJECTORY[i];
+      if (!f || !f.links || !f.gripper) return { links: [], gripper: [] };
+      const links = f.links.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+      const gripper = f.gripper.map(p => new THREE.Vector3(p[0], p[1], p[2]));
+      return { links, gripper };
+    }
+
+    function buildArmGeometry(links, gripper) {
+      const group = new THREE.Group();
+      const mat = new THREE.MeshPhongMaterial({ color: 0x4a5a6e, shininess: 80 });
+      const gripperMat = new THREE.MeshPhongMaterial({ color: 0x289b4b, shininess: 60 });
+      const jointGeom = new THREE.SphereGeometry(0.018, 16, 16);
+      const linkGeom = new THREE.CylinderGeometry(0.015, 0.015, 1, 12);
+      for (let i = 0; i < links.length - 1; i++) {
+        const a = links[i], b = links[i + 1];
+        const len = a.distanceTo(b);
+        const cyl = new THREE.Mesh(linkGeom, mat);
+        cyl.scale.set(1, len, 1);  // CylinderGeometry height=1
+        cyl.position.copy(a).add(b).multiplyScalar(0.5);
+        const dir = new THREE.Vector3().subVectors(b, a).normalize();
+        cyl.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir);
+        group.add(cyl);
+        const sph = new THREE.Mesh(jointGeom, mat);
+        sph.position.copy(a);
+        group.add(sph);
+      }
+      const lastSph = new THREE.Mesh(jointGeom, mat);
+      lastSph.position.copy(links[links.length-1]);
+      group.add(lastSph);
+      const [gb, gfx, gmv] = gripper;
+      const d1 = gb.distanceTo(gfx);
+      const gCyl1 = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, d1, 8), gripperMat);
+      gCyl1.position.copy(gb.clone().add(gfx).multiplyScalar(0.5));
+      gCyl1.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3().subVectors(gfx, gb).normalize());
+      group.add(gCyl1);
+      const d2 = gb.distanceTo(gmv);
+      const gCyl2 = new THREE.Mesh(new THREE.CylinderGeometry(0.008, 0.008, d2, 8), gripperMat);
+      gCyl2.position.copy(gb.clone().add(gmv).multiplyScalar(0.5));
+      gCyl2.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), new THREE.Vector3().subVectors(gmv, gb).normalize());
+      group.add(gCyl2);
+      return group;
+    }
+
+    function computeBounds(trajectory) {
+      let min = new THREE.Vector3(Infinity, Infinity, Infinity);
+      let max = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+      trajectory.forEach((f, i) => {
+        const { links, gripper } = getFrame(i);
+        [...links, ...gripper].forEach(p => {
+          min.min(p);
+          max.max(p);
+        });
+      });
+      min.addScalar(-0.1);
+      max.addScalar(0.1);
+      return { min, max, center: min.clone().add(max).multiplyScalar(0.5), size: max.clone().sub(min) };
+    }
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xf0f4f8);
+    scene.fog = new THREE.Fog(0xf0f4f8, 0.5, 2);
+
+    const camera = new THREE.PerspectiveCamera(50, 1, 0.01, 10);
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.shadowMap.enabled = true;
+    document.getElementById('container').appendChild(renderer.domElement);
+
+    scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+    const light = new THREE.DirectionalLight(0xffffff, 0.8);
+    light.position.set(0.3, 0.5, 0.5);
+    light.castShadow = true;
+    scene.add(light);
+
+    const armGroup = new THREE.Group();
+    scene.add(armGroup);
+
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    let currentFrame = 0;
+    let playing = false;
+    let lastT = 0;
+
+    function updateView() {
+      armGroup.clear();
+      if (TRAJECTORY.length === 0) return;
+      const { links, gripper } = getFrame(currentFrame);
+      if (links.length < 2) return;
+      armGroup.add(buildArmGeometry(links, gripper));
+    }
+
+    function fitCamera() {
+      if (TRAJECTORY.length === 0) return;
+      const bounds = computeBounds(TRAJECTORY);
+      const size = Math.max(bounds.size.x, bounds.size.y, bounds.size.z, 0.3);
+      camera.position.copy(bounds.center).add(new THREE.Vector3(size*0.8, size*0.6, size*0.8));
+      controls.target.copy(bounds.center);
+      controls.update();
+    }
+
+    function resize() {
+      const el = renderer.domElement.parentElement;
+      const w = el.clientWidth || 800, h = el.clientHeight || 400;
+      renderer.setSize(w, h);
+      camera.aspect = w / h;
+      camera.updateProjectionMatrix();
+    }
+
+    function animate(t) {
+      requestAnimationFrame(animate);
+      const dt = (t - lastT) / 1000;
+      lastT = t;
+      if (playing && TRAJECTORY.length > 0) {
+        const inc = Math.max(1, Math.floor(dt * fps));
+        currentFrame = (currentFrame + inc) % TRAJECTORY.length;
+        document.getElementById('frameSlider').value = currentFrame;
+        document.getElementById('frameLabel').textContent = currentFrame;
+        updateView();
+      }
+      controls.update();
+      renderer.render(scene, camera);
+    }
+
+    document.getElementById('playBtn').onclick = () => { playing = true; };
+    document.getElementById('pauseBtn').onclick = () => { playing = false; };
+    document.getElementById('speedInput').onchange = (e) => {
+      fps = Math.max(1, Math.min(60, parseInt(e.target.value) || 8));
+      e.target.value = fps;
+    };
+    document.getElementById('frameSlider').oninput = (e) => {
+      currentFrame = parseInt(e.target.value);
+      document.getElementById('frameLabel').textContent = currentFrame;
+      updateView();
+    };
+
+    window.addEventListener('resize', resize);
+    resize();
+    document.getElementById('totalFrames').textContent = TRAJECTORY.length;
+    document.getElementById('frameSlider').max = Math.max(0, TRAJECTORY.length - 1);
+    updateView();
+    fitCamera();
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
