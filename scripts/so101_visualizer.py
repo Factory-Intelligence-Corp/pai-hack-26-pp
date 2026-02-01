@@ -85,6 +85,17 @@ def _fk_pinocchio(joint_pos_deg: np.ndarray, urdf_path: Path) -> tuple[list[np.n
         if fid < model.nframes and hasattr(data, "oMf"):
             pos = np.array(data.oMf[fid].translation)
             gripper_positions.append(pos)
+    # Symmetrize finger lengths for display (both same length from base)
+    if len(gripper_positions) == 3:
+        fixed_tip, moving_tip = gripper_positions[1], gripper_positions[2]
+        d_fix = np.linalg.norm(fixed_tip - gripper_base)
+        d_mov = np.linalg.norm(moving_tip - gripper_base)
+        finger_len = max(d_fix, d_mov, 0.02)
+        if d_fix > 1e-6:
+            fixed_tip = gripper_base + (fixed_tip - gripper_base) / d_fix * finger_len
+        if d_mov > 1e-6:
+            moving_tip = gripper_base + (moving_tip - gripper_base) / d_mov * finger_len
+        gripper_positions = [gripper_base, fixed_tip, moving_tip]
     if len(gripper_positions) < 3:
         gripper_positions = _gripper_simplified(
             joint_pos_deg, gripper_base, link_positions[-2] if len(link_positions) > 1 else gripper_base
@@ -141,8 +152,9 @@ def _gripper_simplified(
     right = np.cross(forward, np.array([0, 0, 1]))
     right = right / (np.linalg.norm(right) + 1e-9)
     jaw_open = 0.02 * (gripper_deg / 90.0)  # 0–90 deg -> 0–2 cm opening
-    fixed_tip = gripper_base + 0.03 * forward
-    moving_tip = gripper_base - jaw_open * right + 0.02 * forward
+    finger_len = 0.03  # both fingers same length (3cm)
+    fixed_tip = gripper_base + finger_len * forward
+    moving_tip = gripper_base - jaw_open * right + finger_len * forward
     return [gripper_base, fixed_tip, moving_tip]
 
 

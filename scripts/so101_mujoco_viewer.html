@@ -22,7 +22,7 @@
     <button id="pauseBtn">Pause</button>
     <span>Frame: <span id="frameLabel">0</span> / <span id="totalFrames">0</span></span>
     <input type="range" id="frameSlider" min="0" max="0" value="0" style="width:120px;vertical-align:middle">
-    <span>Speed: <input type="number" id="speedInput" value="8" min="1" max="60" step="1" style="width:45px"> fps</span>
+    <span>Speed: <input type="number" id="speedInput" value="8" min="0.5" max="60" step="0.5" style="width:50px"> fps</span>
   </div>
   <script type="importmap">
   {"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/":"https://unpkg.com/three@0.160.0/"}}
@@ -119,6 +119,8 @@
     let currentFrame = 0;
     let playing = false;
     let lastT = 0;
+    let fps = 8;
+    let timeAccum = 0;  // seconds to accumulate before advancing frame
 
     function updateView() {
       armGroup.clear();
@@ -147,23 +149,33 @@
 
     function animate(t) {
       requestAnimationFrame(animate);
-      const dt = (t - lastT) / 1000;
-      lastT = t;
-      if (playing && TRAJECTORY.length > 0) {
-        const inc = Math.max(1, Math.floor(dt * fps));
-        currentFrame = (currentFrame + inc) % TRAJECTORY.length;
-        document.getElementById('frameSlider').value = currentFrame;
-        document.getElementById('frameLabel').textContent = currentFrame;
-        updateView();
+      try {
+        const dt = (t - lastT) / 1000;
+        lastT = t;
+        if (playing && TRAJECTORY.length > 0 && typeof fps === 'number' && fps > 0) {
+          timeAccum += dt;
+          const frameInterval = 1 / fps;
+          while (timeAccum >= frameInterval) {
+            timeAccum -= frameInterval;
+            currentFrame = (currentFrame + 1) % TRAJECTORY.length;
+          }
+          const slider = document.getElementById('frameSlider');
+          const label = document.getElementById('frameLabel');
+          if (slider) slider.value = currentFrame;
+          if (label) label.textContent = currentFrame;
+          updateView();
+        }
+        controls.update();
+        renderer.render(scene, camera);
+      } catch (err) {
+        console.warn('animate error:', err);
       }
-      controls.update();
-      renderer.render(scene, camera);
     }
 
     document.getElementById('playBtn').onclick = () => { playing = true; };
     document.getElementById('pauseBtn').onclick = () => { playing = false; };
-    document.getElementById('speedInput').onchange = (e) => {
-      fps = Math.max(1, Math.min(60, parseInt(e.target.value) || 8));
+    document.getElementById('speedInput').oninput = document.getElementById('speedInput').onchange = (e) => {
+      fps = Math.max(0.5, Math.min(60, parseFloat(e.target.value) || 8));
       e.target.value = fps;
     };
     document.getElementById('frameSlider').oninput = (e) => {

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
 Inference utilities for SO101 Diffusion/ACT policy: load policy, run video inference,
-return per-frame actions. Supports server paths and uploaded videos.
+return per-frame actions. Uses LeRobot dataset (correct frame alignment) or raw videos.
 """
 from __future__ import annotations
 
+import io
 import os
 from pathlib import Path
 from typing import BinaryIO
@@ -40,6 +41,33 @@ from lerobot.utils.constants import (
     POLICY_POSTPROCESSOR_DEFAULT_NAME,
     POLICY_PREPROCESSOR_DEFAULT_NAME,
 )
+
+MAX_FRAMES = 100000
+
+
+def frames_to_video_bytes(
+    frames: list[torch.Tensor],
+    fps: int = 30,
+) -> bytes:
+    """Encode frames (C,H,W) in [0,1] to mp4 bytes for st.video()."""
+    if not frames:
+        return b""
+    import av
+    buf = io.BytesIO()
+    h, w = frames[0].shape[1], frames[0].shape[2]
+    with av.open(buf, "w", format="mp4") as out:
+        stream = out.add_stream("libx264", rate=fps)
+        stream.width = w
+        stream.height = h
+        stream.pix_fmt = "yuv420p"
+        for fr in frames:
+            arr = (fr.permute(1, 2, 0).numpy() * 255).astype("uint8")
+            frame = av.VideoFrame.from_ndarray(arr, format="rgb24")
+            for pkt in stream.encode(frame):
+                out.mux(pkt)
+        for pkt in stream.encode():
+            out.mux(pkt)
+    return buf.getvalue()
 
 
 def resolve_checkpoint_path(path: str) -> str:
@@ -132,9 +160,9 @@ def run_video_inference(
 ) -> tuple[list[np.ndarray], list[torch.Tensor], list[torch.Tensor]]:
     """
     Run inference on front + overhead videos. Returns (actions, front_frames, overhead_frames).
-    actions: list of 6-dim numpy arrays (degrees).
-    When max_frames is None, processes full video (uses min(front, overhead) for sync).
+    When max_frames is None, uses MAX_FRAMES (100000).
     """
+    max_frames = max_frames if max_frames is not None else MAX_FRAMES
     policy, preprocessor, postprocessor, config = load_policy_and_processors(
         checkpoint_path, device
     )
@@ -172,3 +200,86 @@ def run_video_inference(
         actions.append(a)
 
     return actions, front_frames[:n_frames], overhead_frames[:n_frames]
+
+
+def run_dataset_inference(
+    checkpoint_path: str,
+    dataset_root: str | Path,
+    episode_index: int,
+    device: str = "cuda",
+    max_frames: int | None = None,
+    batch_size: int = 32,
+) -> tuple[list[np.ndarray], list[torch.Tensor], list[torch.Tensor]]:
+    """
+    Run inference on a LeRobot dataset episode. Uses correct video alignment
+    (front and overhead frames are from the same episode).
+    Returns (actions, front_frames, overhead_frames).
+    """
+    from lerobot.datasets.lerobot_dataset import LeRobotDataset
+
+    max_frames = max_frames if max_frames is not None else MAX_FRAMES
+
+    policy, preprocessor, postprocessor, config = load_policy_and_processors(
+        checkpoint_path, device
+    )
+
+    dataset_root = Path(dataset_root).expanduser().resolve()
+    repo_id = dataset_root.name
+    ds = LeRobotDataset(
+        repo_id=repo_id,
+        root=str(dataset_root),
+        episodes=[episode_index],
+        video_backend="pyav",
+    )
+
+    n_frames = min(len(ds), max_frames)
+    if n_frames == 0:
+        raise ValueError(f"No frames in episode {episode_index}")
+
+    state_ft = config.input_features.get("observation.state")
+    state_dim = state_ft.shape[0] if state_ft and state_ft.shape else 6
+
+    if hasattr(policy, "reset"):
+        policy.reset()
+    elif hasattr(policy, "module") and hasattr(policy.module, "reset"):
+        policy.module.reset()
+
+    actions = []
+    front_frames = []
+    overhead_frames = []
+
+    for start in range(0, n_frames, batch_size):
+        end = min(start + batch_size, n_frames)
+        batch_front = []
+        batch_overhead = []
+        for i in range(start, end):
+            item = ds[i]
+            batch_front.append(item["observation.images.front"])
+            batch_overhead.append(item["observation.images.overhead"])
+
+        front_stack = torch.stack(batch_front).to(device)
+        overhead_stack = torch.stack(batch_overhead).to(device)
+        state_stack = torch.zeros(len(batch_front), state_dim, device=device)
+
+        obs = {
+            "observation.images.front": front_stack,
+            "observation.images.overhead": overhead_stack,
+            "observation.state": state_stack,
+        }
+        obs = preprocessor(obs)
+        with torch.no_grad():
+            action = policy.select_action(obs)
+        action = postprocessor(action)
+
+        if isinstance(action, torch.Tensor):
+            a = action.cpu().numpy()
+        else:
+            a = np.array(action)
+        if a.ndim == 1:
+            a = a[np.newaxis, :]
+        for j in range(len(batch_front)):
+            actions.append(a[j])
+            front_frames.append(batch_front[j])
+            overhead_frames.append(batch_overhead[j])
+
+    return actions, front_frames, overhead_frames

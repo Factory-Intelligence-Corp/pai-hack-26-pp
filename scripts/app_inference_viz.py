@@ -25,14 +25,13 @@ from lerobot.policies.act.configuration_act import ACTConfig  # noqa: F401
 
 import streamlit.components.v1 as components
 
-from scripts.inference_utils import run_video_inference
+from scripts.inference_utils import frames_to_video_bytes, run_dataset_inference, run_video_inference
 from scripts.so101_visualizer import build_threejs_viewer_html, trajectory_for_threejs
 
 DEFAULT_CHECKPOINT = (
     "outputs/train/diffusion_so101_bench_real_2_v2.1/checkpoints/004000/pretrained_model"
 )
-DEFAULT_FRONT = "~/datasets/5hadytru/so101_bench_real_2_v2.1/videos/observation.images.front/chunk-000/file-000.mp4"
-DEFAULT_OVERHEAD = "~/datasets/5hadytru/so101_bench_real_2_v2.1/videos/observation.images.overhead/chunk-000/file-000.mp4"
+DEFAULT_DATASET_ROOT = "~/datasets/5hadytru/so101_bench_real_2_v2.1"
 
 st.set_page_config(
     page_title="SO101 Inference & 3D Viewer",
@@ -42,9 +41,8 @@ st.set_page_config(
 
 st.title("SO101 Diffusion Policy Inference & 3D Arm Viewer")
 st.markdown(
-    "Upload or specify server paths for **front** and **overhead** videos "
-    "(format: 480x640, 30fps, same as so101_bench_real_2_v2.1), run inference, "
-    "and visualize the predicted arm motion in 3D."
+    "Use **LeRobot dataset** (correct frame alignment) or raw videos. "
+    "Max frames 100,000. Use LeRobot dataset for correct front/overhead alignment."
 )
 
 with st.sidebar:
@@ -52,92 +50,103 @@ with st.sidebar:
     checkpoint_path = st.text_input(
         "Checkpoint path",
         value=DEFAULT_CHECKPOINT,
-        help="Path to pretrained_model (e.g. .../checkpoints/004000/pretrained_model)",
+        help="Path to pretrained_model",
     )
-    process_all = st.checkbox(
-        "Process all frames (full video length)",
-        value=True,
-        help="When unchecked, limit to max frames below",
-    )
-    max_frames = st.number_input(
-        "Max frames (when not processing all)",
-        min_value=1,
-        max_value=100000,
-        value=1000,
-        help="Only used when 'Process all frames' is unchecked",
-        disabled=process_all,
-    )
+    input_mode = st.radio("Input mode", ["LeRobot dataset", "Raw videos"], horizontal=True)
 
-    st.subheader("Video Input (front + overhead)")
-    input_mode = st.radio("Input mode", ["Server path", "Upload"], horizontal=True)
-
-    front_path = None
-    overhead_path = None
-    front_upload = None
-    overhead_upload = None
-
-    if input_mode == "Server path":
+    if input_mode == "LeRobot dataset":
+        dataset_root = st.text_input(
+            "Dataset root",
+            value=os.path.expanduser(DEFAULT_DATASET_ROOT),
+            help="e.g. ~/datasets/5hadytru/so101_bench_real_2_v2.1",
+        )
+        episode_index = st.number_input(
+            "Episode index",
+            min_value=0,
+            max_value=100000,
+            value=0,
+            help="Episode to run inference on",
+        )
+    else:
         front_path = st.text_input(
             "Front video path",
-            value=os.path.expanduser(DEFAULT_FRONT),
-            help="e.g. ~/datasets/.../observation.images.front/.../file-000.mp4",
+            value=os.path.expanduser(DEFAULT_DATASET_ROOT + "/videos/observation.images.front/chunk-000/file-000.mp4"),
         )
         overhead_path = st.text_input(
             "Overhead video path",
-            value=os.path.expanduser(DEFAULT_OVERHEAD),
-            help="e.g. ~/datasets/.../observation.images.overhead/.../file-000.mp4",
+            value=os.path.expanduser(DEFAULT_DATASET_ROOT + "/videos/observation.images.overhead/chunk-000/file-000.mp4"),
         )
-    else:
-        front_upload = st.file_uploader("Front video (mp4)", type=["mp4"])
-        overhead_upload = st.file_uploader("Overhead video (mp4)", type=["mp4"])
+
+    process_all = st.checkbox(
+        "Process all frames",
+        value=True,
+        help="When unchecked, limit to max frames",
+    )
+    max_frames = st.number_input(
+        "Max frames (when not all)",
+        min_value=1,
+        max_value=100000,
+        value=1000,
+        disabled=process_all,
+    )
 
     run_btn = st.button("Run Inference")
 
-def has_video_input():
-    if input_mode == "Server path":
-        fp = os.path.expanduser(front_path or "")
-        op = os.path.expanduser(overhead_path or "")
-        return bool(fp and op and os.path.isfile(fp) and os.path.isfile(op))
-    return bool(front_upload and overhead_upload)
+def has_dataset_input():
+    if input_mode != "LeRobot dataset":
+        return False
+    root = os.path.expanduser(dataset_root or "")
+    meta = os.path.join(root, "meta", "info.json")
+    return bool(root and os.path.isfile(meta))
+
+def has_raw_input():
+    if input_mode != "Raw videos":
+        return False
+    fp = os.path.expanduser(front_path or "")
+    op = os.path.expanduser(overhead_path or "")
+    return bool(fp and op and os.path.isfile(fp) and os.path.isfile(op))
 
 if run_btn:
     if not checkpoint_path:
         st.error("Please specify a checkpoint path.")
-    elif not has_video_input():
-        st.error("Please provide both front and overhead videos (path or upload).")
+    elif input_mode == "LeRobot dataset" and not has_dataset_input():
+        st.error("Please specify a valid dataset root (with meta/info.json).")
+    elif input_mode == "Raw videos" and not has_raw_input():
+        st.error("Please specify valid front and overhead video paths.")
     else:
         with st.spinner("Running inference..."):
             try:
-                if input_mode == "Server path":
+                max_n = None if process_all else int(max_frames)
+                if input_mode == "LeRobot dataset":
+                    root = os.path.expanduser(dataset_root)
+                    actions, front_frames, overhead_frames = run_dataset_inference(
+                        checkpoint_path,
+                        root,
+                        int(episode_index),
+                        device="cuda",
+                        max_frames=max_n,
+                    )
+                    # Encode frames to video bytes for play button (dataset has no raw video file)
+                    front_video_src = frames_to_video_bytes(front_frames)
+                    overhead_video_src = frames_to_video_bytes(overhead_frames)
+                else:
                     front = os.path.expanduser(front_path)
                     overhead = os.path.expanduser(overhead_path)
-                    front_video_src = front
-                    overhead_video_src = overhead
-                else:
-                    front_bytes = front_upload.read()
-                    overhead_bytes = overhead_upload.read()
-                    front = io.BytesIO(front_bytes)
-                    overhead = io.BytesIO(overhead_bytes)
-                    front_video_src = front_bytes
-                    overhead_video_src = overhead_bytes
-                actions, front_frames, overhead_frames = run_video_inference(
-                    checkpoint_path,
-                    front,
-                    overhead,
-                    device="cuda",
-                    max_frames=None if process_all else int(max_frames),
-                )
+                    front_video_src, overhead_video_src = front, overhead
+                    actions, front_frames, overhead_frames = run_video_inference(
+                        checkpoint_path,
+                        front,
+                        overhead,
+                        device="cuda",
+                        max_frames=max_n,
+                    )
                 st.session_state["actions"] = actions
                 st.session_state["front_frames"] = front_frames
                 st.session_state["overhead_frames"] = overhead_frames
                 st.session_state["front_video_src"] = front_video_src
                 st.session_state["overhead_video_src"] = overhead_video_src
-                n_front = len(front_frames)
-                n_overhead = len(overhead_frames)
-                msg = f"Inferred {len(actions)} actions from {n_front} front + {n_overhead} overhead frames."
-                if n_front != n_overhead:
-                    msg += f" (Used min={len(actions)} frames — different video lengths may be from different recording durations or chunking.)"
-                st.success(msg)
+                src = f"episode {episode_index}" if input_mode == "LeRobot dataset" else "raw videos"
+                st.success(f"Inferred {len(actions)} actions from {src}.")
             except Exception as e:
                 st.error(f"Inference failed: {e}")
                 import traceback
