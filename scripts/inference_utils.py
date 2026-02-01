@@ -133,6 +133,7 @@ def run_video_inference(
     """
     Run inference on front + overhead videos. Returns (actions, front_frames, overhead_frames).
     actions: list of 6-dim numpy arrays (degrees).
+    When max_frames is None, processes full video (uses min(front, overhead) for sync).
     """
     policy, preprocessor, postprocessor, config = load_policy_and_processors(
         checkpoint_path, device

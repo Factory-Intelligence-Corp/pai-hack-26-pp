@@ -54,12 +54,18 @@ with st.sidebar:
         value=DEFAULT_CHECKPOINT,
         help="Path to pretrained_model (e.g. .../checkpoints/004000/pretrained_model)",
     )
+    process_all = st.checkbox(
+        "Process all frames (full video length)",
+        value=True,
+        help="When unchecked, limit to max frames below",
+    )
     max_frames = st.number_input(
-        "Max frames to process",
+        "Max frames (when not processing all)",
         min_value=1,
-        max_value=1000,
-        value=30,
-        help="Limit frames for faster inference",
+        max_value=100000,
+        value=1000,
+        help="Only used when 'Process all frames' is unchecked",
+        disabled=process_all,
     )
 
     st.subheader("Video Input (front + overhead)")
@@ -119,14 +125,19 @@ if run_btn:
                     front,
                     overhead,
                     device="cuda",
-                    max_frames=max_frames,
+                    max_frames=None if process_all else int(max_frames),
                 )
                 st.session_state["actions"] = actions
                 st.session_state["front_frames"] = front_frames
                 st.session_state["overhead_frames"] = overhead_frames
                 st.session_state["front_video_src"] = front_video_src
                 st.session_state["overhead_video_src"] = overhead_video_src
-                st.success(f"Inferred {len(actions)} actions.")
+                n_front = len(front_frames)
+                n_overhead = len(overhead_frames)
+                msg = f"Inferred {len(actions)} actions from {n_front} front + {n_overhead} overhead frames."
+                if n_front != n_overhead:
+                    msg += f" (Used min={len(actions)} frames — different video lengths may be from different recording durations or chunking.)"
+                st.success(msg)
             except Exception as e:
                 st.error(f"Inference failed: {e}")
                 import traceback
