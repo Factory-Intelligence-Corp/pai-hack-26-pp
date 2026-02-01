@@ -6,7 +6,12 @@ Loads .env for HF token, then runs lerobot-train with policy.type=diffusion.
 so101_bench_real contains video/image observations (observation.images.front,
 observation.images.overhead) suitable for Diffusion Policy training.
 
-Troubleshooting CUDA Error 802 (system not yet initialized):
+Troubleshooting:
+  - ChildFailedError exitcode 1: Run with --log-file train.log to capture full error.
+    Try --num-gpus 1 first; if single-GPU works, reduce --num-workers or --batch-size for multi-GPU.
+  - SignalException/signal 15: Process was killed (Ctrl+C, OOM, or session disconnect).
+    No checkpoints if killed before first save (checkpoints saved periodically in output_dir).
+  - CUDA Error 802 (system not yet initialized):
   On 8x A100/H100 (NVSwitch) instances, NVIDIA Fabric Manager must be running.
   Install and start it:
     sudo apt-get install -y nvidia-fabricmanager-XXX   # XXX = driver version, e.g. 570 or 580
@@ -105,6 +110,47 @@ def main() -> None:
         choices=("no", "fp16", "bf16"),
         help="Mixed precision for multi-GPU (default: bf16 for A100)",
     )
+    parser.add_argument(
+        "--no-wandb",
+        action="store_true",
+        help="Disable Weights & Biases logging (enabled by default when WANDB_API_KEY in .env)",
+    )
+    parser.add_argument(
+        "--wandb-project",
+        default="PAI_hackathon",
+        help="Wandb project name (default: PAI_hackathon)",
+    )
+    parser.add_argument(
+        "--wandb-entity",
+        default="littledesk",
+        help="Wandb entity/team (default: littledesk)",
+    )
+    parser.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="DataLoader workers (default: 2 for multi-GPU, 4 for single-GPU)",
+    )
+    parser.add_argument(
+        "--log-file",
+        default=None,
+        help="Also write output to file (for debugging failures)",
+    )
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Resume from checkpoint (requires --config-path)",
+    )
+    parser.add_argument(
+        "--config-path",
+        default=None,
+        help="Path to train_config.json for resume (e.g. outputs/train/.../checkpoints/last/pretrained_model/train_config.json)",
+    )
+    parser.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="Remove output_dir if it exists and start fresh",
+    )
     args = parser.parse_args()
 
     root = os.path.expanduser(args.root)
@@ -113,6 +159,23 @@ def main() -> None:
     job_name = args.job_name or f"diffusion_{dataset_name}"
     output_dir = args.output_dir or os.path.join("outputs", "train", job_name)
     policy_repo_id = args.policy_repo_id or f"diffusion_{dataset_name}"
+
+    # Check dataset exists with LeRobot structure (meta/info.json)
+    meta_info = os.path.join(dataset_root, "meta", "info.json")
+    if not os.path.exists(meta_info):
+        print(
+            f"Error: Dataset not found or invalid. Expected {meta_info}\n"
+            f"  Ensure --root points to a directory containing LeRobot datasets (with meta/, data/, videos/).\n"
+            f"  Run: python scripts/load_data.py  # to list available datasets",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    # Overwrite: remove stale output dir from failed runs
+    if args.overwrite and os.path.isdir(output_dir):
+        import shutil
+        shutil.rmtree(output_dir)
+        print(f"Removed existing {output_dir} (--overwrite)")
 
     cmd = [
         "lerobot-train",
@@ -130,8 +193,33 @@ def main() -> None:
         cmd.append(f"--batch_size={args.batch_size}")
     if args.steps is not None:
         cmd.append(f"--steps={args.steps}")
-
+    nw = args.num_workers
+    if nw is None:
+        nw = 2 if args.num_gpus > 1 else 4  # reduce workers for multi-GPU to avoid fd/mem pressure
+    cmd.append(f"--num_workers={nw}")
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if args.resume:
+        cmd.append("--resume=true")
+        if not args.config_path:
+            print(
+                "Error: --resume requires --config-path pointing to train_config.json\n"
+                "  Example: --config-path outputs/train/diffusion_xxx/checkpoints/last/pretrained_model/train_config.json",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        # Use absolute path so LeRobot treats it as local file, not HF repo
+        config_path_abs = os.path.normpath(os.path.join(project_root, args.config_path))
+        if not os.path.isfile(config_path_abs):
+            print(f"Error: config_path not found: {config_path_abs}", file=sys.stderr)
+            sys.exit(1)
+        cmd.append(f"--config_path={config_path_abs}")
+    if args.no_wandb:
+        cmd.append("--wandb.enable=false")
+    else:
+        cmd.append("--wandb.enable=true")
+        cmd.append(f"--wandb.project={args.wandb_project}")
+        cmd.append(f"--wandb.entity={args.wandb_entity}")
+
     train_args = cmd[1:]  # --dataset.repo_id=... etc
 
     if args.num_gpus > 1:
@@ -171,7 +259,26 @@ def main() -> None:
         except (FileNotFoundError, subprocess.TimeoutExpired):
             pass
 
-    ret = subprocess.run(run_cmd, cwd=project_root)
+    if args.log_file:
+        # Capture full output for debugging (tee to file)
+        log_path = os.path.join(project_root, args.log_file)
+        proc = subprocess.Popen(
+            run_cmd,
+            cwd=project_root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        with open(log_path, "w") as f:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                f.write(line)
+                f.flush()
+        proc.wait()
+        ret = subprocess.CompletedProcess(run_cmd, proc.returncode)
+    else:
+        ret = subprocess.run(run_cmd, cwd=project_root)
     if ret.returncode != 0:
         sys.exit(ret.returncode)
 
