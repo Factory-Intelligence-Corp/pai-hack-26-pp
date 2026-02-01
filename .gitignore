@@ -1,5 +1,6 @@
 # HF token and secrets
 .env
+*.pem
 .env.local
 .env.*.local
 

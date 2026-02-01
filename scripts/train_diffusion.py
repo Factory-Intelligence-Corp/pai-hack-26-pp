@@ -94,6 +94,12 @@ def main() -> None:
         help="Training steps (default: 100000)",
     )
     parser.add_argument(
+        "--save-freq",
+        type=int,
+        default=None,
+        help="Save checkpoint every N steps (default: 20000). Use 5000 to save more often.",
+    )
+    parser.add_argument(
         "--dry-run",
         action="store_true",
         help="Only print the lerobot-train command, do not run",
@@ -187,12 +193,15 @@ def main() -> None:
         f"--job_name={job_name}",
         f"--policy.device={args.device}",
         f"--policy.repo_id={policy_repo_id}",
+        "--save_checkpoint=true",  # ensure last checkpoint is always saved
     ]
 
     if args.batch_size is not None:
         cmd.append(f"--batch_size={args.batch_size}")
     if args.steps is not None:
         cmd.append(f"--steps={args.steps}")
+    if args.save_freq is not None:
+        cmd.append(f"--save_freq={args.save_freq}")
     nw = args.num_workers
     if nw is None:
         nw = 2 if args.num_gpus > 1 else 4  # reduce workers for multi-GPU to avoid fd/mem pressure
