@@ -6,10 +6,17 @@ Loads .env for HF token, then runs lerobot-train with policy.type=diffusion.
 so101_bench_real contains video/image observations (observation.images.front,
 observation.images.overhead) suitable for Diffusion Policy training.
 
+Troubleshooting CUDA Error 802 (system not yet initialized):
+  On 8x A100/H100 (NVSwitch) instances, NVIDIA Fabric Manager must be running.
+  Install and start it:
+    sudo apt-get install -y nvidia-fabricmanager-XXX   # XXX = driver version, e.g. 570 or 580
+    sudo systemctl start nvidia-fabricmanager
+  Verify: nvidia-smi -q | grep -A2 Fabric  (State should be "Completed")
+
 Usage:
   uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1
   uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1 --root ~/data
-  uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1 --output-dir outputs/train/diffusion_so101
+  uv run python scripts/train_diffusion.py so101_bench_real_2_v2.1 --num-gpus 8   # DDP on all 8 GPUs
 """
 from __future__ import annotations
 
@@ -86,6 +93,18 @@ def main() -> None:
         action="store_true",
         help="Only print the lerobot-train command, do not run",
     )
+    parser.add_argument(
+        "--num-gpus",
+        type=int,
+        default=1,
+        help="Number of GPUs for DDP (default: 1). Use 8 for all 8 A100s.",
+    )
+    parser.add_argument(
+        "--mixed-precision",
+        default="bf16",
+        choices=("no", "fp16", "bf16"),
+        help="Mixed precision for multi-GPU (default: bf16 for A100)",
+    )
     args = parser.parse_args()
 
     root = os.path.expanduser(args.root)
@@ -112,13 +131,47 @@ def main() -> None:
     if args.steps is not None:
         cmd.append(f"--steps={args.steps}")
 
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    train_args = cmd[1:]  # --dataset.repo_id=... etc
+
+    if args.num_gpus > 1:
+        # Use accelerate from same venv as sys.executable
+        venv_bin = os.path.dirname(os.path.abspath(sys.executable))
+        accelerate_bin = os.path.join(venv_bin, "accelerate")
+        if not os.path.exists(accelerate_bin):
+            accelerate_bin = "accelerate"
+        run_cmd = [
+            accelerate_bin,
+            "launch",
+            "--multi_gpu",
+            f"--num_processes={args.num_gpus}",
+        ]
+        if args.mixed_precision != "no":
+            run_cmd.append(f"--mixed_precision={args.mixed_precision}")
+        run_cmd.extend(["-m", "lerobot.scripts.lerobot_train"])
+        run_cmd.extend(train_args)
+    else:
+        run_cmd = [sys.executable, "-m", "lerobot.scripts.lerobot_train"] + train_args
+
     if args.dry_run:
         print("Would run:")
-        print("  " + " ".join(cmd))
+        print("  " + " ".join(run_cmd))
         return
 
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    ret = subprocess.run(cmd, cwd=project_root)
+    # Warm up CUDA driver before training (helps avoid Error 802: system not yet initialized)
+    # On cloud instances (e.g. AWS), nvidia-smi can take 15+ seconds on first run
+    if args.device == "cuda":
+        try:
+            subprocess.run(
+                ["nvidia-smi"],
+                capture_output=True,
+                check=False,
+                timeout=60,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            pass
+
+    ret = subprocess.run(run_cmd, cwd=project_root)
     if ret.returncode != 0:
         sys.exit(ret.returncode)
 
