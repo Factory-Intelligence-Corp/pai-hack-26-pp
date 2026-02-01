@@ -74,8 +74,11 @@ def main() -> None:
     output_dir = args.output_dir or os.path.join("outputs", "train", job_name)
     policy_repo_id = args.policy_repo_id or f"act_{dataset_name}"
 
+    # Use module form so it works without uv / without lerobot-train on PATH
     cmd = [
-        "lerobot-train",
+        sys.executable,
+        "-m",
+        "lerobot.scripts.lerobot_train",
         f"--dataset.repo_id={dataset_name}",
         f"--dataset.root={dataset_root}",
         "--dataset.video_backend=pyav",
